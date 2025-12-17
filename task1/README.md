@@ -33,7 +33,29 @@ Nhóm thực hiện quy trình thu thập, làm sạch và tiền xử lý dữ 
 - **Code xây dựng vocabulary:**
 ```python
 class Vocabulary:
-	pass
+    def __init__(self):
+        self.stoi = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
+        self.itos = {0: '<pad>', 1: '<sos>', 2: '<eos>', 3: '<unk>'}
+        self.freq_threshold = 2
+
+    def tokenizer(self, text):
+        text = text.lower().strip()
+        return re.findall(r"\w+|[^\w\s]", text)
+
+    def build_vocabulary(self, sentence_list):
+        frequencies = Counter()
+        idx = 4
+        for sentence in sentence_list:
+            for word in self.tokenizer(sentence):
+                frequencies[word] += 1
+                if frequencies[word] == self.freq_threshold:
+                    self.stoi[word] = idx
+                    self.itos[idx] = word
+                    idx += 1
+
+    def numericalize(self, text):
+        tokenized_text = self.tokenizer(text)
+        return [self.stoi.get(token, self.stoi['<unk>']) for token in tokenized_text]
 ```
 
 ### B. Xây dựng kiến trúc Transformer
@@ -45,7 +67,31 @@ class Vocabulary:
 	- **Code:**
 	```python
 	class TransformerEmbedding(nn.Module):
-		pass
+		def __init__(self, vocab_size, d_model, max_len=5000, drop_prob=0.1):
+			super().__init__()
+			self.d_model = d_model
+
+			# Input/Output Embedding
+			self.tok_emb = nn.Embedding(vocab_size, d_model)
+
+			# Positional Encoding
+			pe = torch.zeros(max_len, d_model)
+			position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+			div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+			# Sin PE
+			pe[:, 0::2] = torch.sin(position * div_term)
+			pe[:, 1::2] = torch.cos(position * div_term)
+
+			self.register_buffer('pe', pe.unsqueeze(0)) # no update gradient
+			self.dropout = nn.Dropout(p=drop_prob)
+
+		def forward(self, x):
+			# x: (Batch, Seq_Len)
+			token_emb = self.tok_emb(x) * math.sqrt(self.d_model)
+			# 2. Add PE
+			pos_emb = self.pe[:, :x.size(1), :]
+			return self.dropout(token_emb + pos_emb)
 	```
 
 - **Multihead attention:**
@@ -61,7 +107,45 @@ class Vocabulary:
 	- **Code:**
 	```python
 	class MultiHeadAttention(nn.Module):
-		pass
+		def __init__(self, d_model, n_head):
+			super().__init__()
+			self.n_head = n_head
+			self.head_dim = d_model // n_head
+			self.d_model = d_model
+
+			# Q, K, V
+			self.w_q = nn.Linear(d_model, d_model)
+			self.w_k = nn.Linear(d_model, d_model)
+			self.w_v = nn.Linear(d_model, d_model)
+
+			# Linear
+			self.fc_out = nn.Linear(d_model, d_model)
+
+		def forward(self, q, k, v, mask=None):
+			# q, k, v: (Batch, Seq_Len, d_model)
+			batch_size = q.size(0)
+
+			# 1. Linear Project & Split Heads
+			# d_model -> n_head x head_dim
+			Q = self.w_q(q).view(batch_size, -1, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+			K = self.w_k(k).view(batch_size, -1, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+			V = self.w_v(v).view(batch_size, -1, self.n_head, self.head_dim).permute(0, 2, 1, 3)
+
+			# 2. Scaled Dot-Product Attention
+			# Energy: Q * K^T / sqrt(head_dim)
+			energy = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+			# 3. Apply Mask
+			if mask is not None:
+				energy = energy.masked_fill(mask == 0, -1e9)
+
+			# 4. Softmax & Weighted Sum
+			attention = torch.softmax(energy, dim=-1)
+			x = torch.matmul(attention, V) # (Batch, n_head, Seq_Len, head_dim)
+
+			# 5. Concat Heads & Final Linear
+			x = x.permute(0, 2, 1, 3).contiguous().view(batch_size, -1, self.d_model)
+			return self.fc_out(x)
 	```
 
 - **Position-wise Feed-Forward Network (FFN):**
@@ -72,7 +156,16 @@ class Vocabulary:
 	- **Code:**
 	```python
 	class PositionwiseFeedForward(nn.Module):
-		pass
+		def __init__(self, d_model, d_ff, dropout=0.1):
+			super().__init__()
+			# Linear -> ReLU -> Linear
+			self.fc1 = nn.Linear(d_model, d_ff)
+			self.fc2 = nn.Linear(d_ff, d_model)
+			self.dropout = nn.Dropout(dropout)
+			self.relu = nn.ReLU()
+
+		def forward(self, x):
+			return self.fc2(self.dropout(self.relu(self.fc1(x))))
 	```
 
 - **Encoder Layer:**
@@ -82,7 +175,31 @@ Encoder bao gồm $$N$$ lớp xếp chồng lên nhau. Mỗi lớp có hai khố
 	- **Code:**
 	```python
 	class EncoderLayer(nn.Module):
-		pass
+		def __init__(self, d_model, n_head, d_ff, dropout):
+			super().__init__()
+			# Sub-layer 1: Self Attention
+			self.self_attn = MultiHeadAttention(d_model, n_head)
+			self.norm1 = nn.LayerNorm(d_model) # Add & Norm
+
+			# Sub-layer 2: Feed Forward
+			self.ffn = PositionwiseFeedForward(d_model, d_ff, dropout)
+			self.norm2 = nn.LayerNorm(d_model) # Add & Norm
+
+			self.dropout = nn.Dropout(dropout)
+
+		def forward(self, src, src_mask):
+			# 1. Self-Attention: Multi-Head attention with all Q,K,V from src
+			_src = self.self_attn(src, src, src, src_mask)
+
+			# Add & Norm (Residual)
+			src = self.norm1(src + self.dropout(_src))
+
+			# 2. Feed Forward
+			_src = self.ffn(src)
+
+			# Add & Norm
+			src = self.norm2(src + self.dropout(_src))
+			return src
 	```
 
 - **Decoder Layer:**
@@ -93,7 +210,39 @@ Decoder cũng gồm $N$ lớp, nhưng mỗi lớp có thêm một khối cross-a
 	- **Code:**
 	```python
 	class DecoderLayer(nn.Module):
-		pass
+		def __init__(self, d_model, n_head, d_ff, dropout):
+			super().__init__()
+
+			# Sub-layer 1: Masked Self-Attention
+			self.self_attn = MultiHeadAttention(d_model, n_head)
+			self.norm1 = nn.LayerNorm(d_model)
+
+			# Sub-layer 2: Cross-Attention
+			self.cross_attn = MultiHeadAttention(d_model, n_head)
+			self.norm2 = nn.LayerNorm(d_model)
+
+			# Sub-layer 3: Feed Forward
+			self.ffn = PositionwiseFeedForward(d_model, d_ff, dropout)
+			self.norm3 = nn.LayerNorm(d_model)
+
+			self.dropout = nn.Dropout(dropout)
+
+		def forward(self, trg, enc_src, trg_mask, src_mask):
+			# 1. Masked Self-Attention
+			# Q, K, V from src. Mask: future mask
+			_trg = self.self_attn(trg, trg, trg, trg_mask)
+			trg = self.norm1(trg + self.dropout(_trg))
+
+			# 2. Cross-Attention (Encoder-Decoder Attention)
+			# Q: target (Decoder), K,V: source (Encoder)
+			_trg = self.cross_attn(trg, enc_src, enc_src, src_mask)
+			trg = self.norm2(trg + self.dropout(_trg))
+
+			# 3. Feed Forward
+			_trg = self.ffn(trg)
+			trg = self.norm3(trg + self.dropout(_trg))
+
+			return trg
 	```
 
 - **Transformer:**
@@ -101,7 +250,76 @@ Ghép nối Encoder và Decoder, thêm lớp Linear cuối cùng và hàm Softma
 	- Code:
 	```python
 	class Transformer(nn.Module):
-		pass
+		def __init__(
+			self,
+			src_vocab_size, trg_vocab_size,
+			src_pad_idx, trg_pad_idx,
+			d_model=512, n_head=8, n_layer=6, d_ff=2048,
+			dropout=0.1, device="cuda"
+		):
+			super().__init__()
+			self.device = device
+			self.src_pad_idx = src_pad_idx
+			self.trg_pad_idx = trg_pad_idx
+
+			# 1. Input Embeddings & Positional Encoding
+			self.src_embedding = TransformerEmbedding(src_vocab_size, d_model, drop_prob=dropout)
+			self.trg_embedding = TransformerEmbedding(trg_vocab_size, d_model, drop_prob=dropout)
+
+			# 2. Encoder (Nx)
+			self.encoder_layers = nn.ModuleList([
+				EncoderLayer(d_model, n_head, d_ff, dropout) for _ in range(n_layer)
+			])
+
+			# 3. Decoder (Nx)
+			self.decoder_layers = nn.ModuleList([
+				DecoderLayer(d_model, n_head, d_ff, dropout) for _ in range(n_layer)
+			])
+
+			# 4. Linear & Softmax
+			# PyTorch CrossEntropyLoss included Softmax
+			self.fc_out = nn.Linear(d_model, trg_vocab_size)
+
+		def make_src_mask(self, src):
+			# padding mask
+			# Shape: (Batch, 1, 1, Src_Len)
+			return (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2).to(self.device)
+
+		def make_trg_mask(self, trg):
+			# padding mask
+			trg_pad_mask = (trg != self.trg_pad_idx).unsqueeze(1).unsqueeze(2)
+
+			# future mask
+			trg_len = trg.shape[1]
+			trg_sub_mask = torch.tril(torch.ones((trg_len, trg_len), device=self.device)).bool()
+
+			return (trg_pad_mask & trg_sub_mask).to(self.device)
+
+		def forward(self, src, trg):
+			# src: (Batch, Src_Len) -> Inputs
+			# trg: (Batch, Trg_Len) -> Outputs (shifted right)
+
+			src_mask = self.make_src_mask(src)
+			trg_mask = self.make_trg_mask(trg)
+
+			# --- Encoder Flow ---
+			# 1. Input -> Embedding + Positional Encoding
+			enc_src = self.src_embedding(src)
+
+			# 2. Nx Encoder
+			for layer in self.encoder_layers:
+				enc_src = layer(enc_src, src_mask)
+
+			# --- Decoder Flow ---
+			# 3. Output (shifted) -> Embedding + Positional Encoding
+			output = self.trg_embedding(trg)
+
+			# 4. Nx Decoder
+			for layer in self.decoder_layers:
+				output = layer(output, enc_src, trg_mask, src_mask)
+
+			# 5. Output Probabilities
+			return self.fc_out(output)
 	```
 
 ### C. Training
