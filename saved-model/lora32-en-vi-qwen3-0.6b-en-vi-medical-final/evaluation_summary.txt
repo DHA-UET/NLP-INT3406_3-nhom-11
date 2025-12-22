@@ -1,0 +1,13 @@
+VLSP 2025 Medical MT Evaluation
+============================================================
+Model: unsloth/Qwen3-0.6B-unsloth-bnb-4bit
+Direction: EN → VI
+Strategy: RAG + Few-shot (3 examples)
+Training samples: 347,351
+Test samples: 3,000
+
+BLEU Score: 60.16
+BLEU-1: 71.99
+BLEU-2: 62.32
+BLEU-3: 56.22
+BLEU-4: 51.92

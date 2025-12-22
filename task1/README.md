@@ -12,7 +12,7 @@ Nhóm thực hiện quy trình thu thập, làm sạch và tiền xử lý dữ 
 - **Thống kê dữ liệu:**
 	- Train data: Gồm 133,166 cặp câu Tiếng Anh (train.en.txt) và Tiếng Việt (train.vi.txt)
 	- Validation data: Trích xuất ngẫu nhiên 10% từ tập train gốc, tương đương 13,317 cặp câu để theo dõi quá trình huấn luyện và tránh hiện tượng overfitting. Tập train thực tế còn lại 119,849 cặp câu.
-	- Test data: Gồm 2 bộ: **tst2012** (1,553 cặp câu) và **tst2013** (xxx cặp câu)
+	- Test data: Gồm 2 bộ: **tst2012** (1,553 cặp câu) và **tst2013** (1268 cặp câu)
 
 - **Tiền xử lý dữ liệu (Preprocessing Data):**
 	- **Làm sạch (Cleaning):** Loại bỏ các ký tự nhiễu, chỉ giữ lại chữ cái và số, chuẩn hóa khoảng trắng.
@@ -24,8 +24,8 @@ Nhóm thực hiện quy trình thu thập, làm sạch và tiền xử lý dữ 
 	- Thêm 4 token đặc biệt: `<pad>` (0), `<sos>` (1), `<eos>` (2), `<unk>` (3).
 	- Ngưỡng tần suất (min_freq): 2 (loại bỏ các từ chỉ xuất hiện 1 lần để giảm nhiễu bằng cách chuyển thành `<unk>`).
 	- **Kích thước từ điển:**
-		- Tiếng Anh (Source): xxxx từ.
-		- Tiếng Việt (Target): yyyy từ.
+		- Tiếng Anh (Source): 26690 từ.
+		- Tiếng Việt (Target): 11278 từ.
 - **Padding & Truncation:**
 	- Áp dụng kỹ thuật Dynamic Padding trong DataLoader: Thay vì đệm (pad) toàn bộ dữ liệu theo độ dài cố định, nhóm thực hiện đệm theo độ dài của câu dài nhất trong từng batch. Điều này giúp giảm đáng kể chi phí tính toán cho các token `<pad>`.
 	- Giới hạn độ dài câu tối đa (MAX_LEN) là 100 token.
@@ -333,7 +333,7 @@ N_LAYER = 4            # Số lớp Encoder/Decoder
 D_FF = 1024            # Kích thước ẩn của lớp FFN (4 * d_model)
 DROPOUT = 0.1          # Hệ số dropout để tránh overfitting
 EPOCHS = 10            # Số vòng lặp huấn luyện
-LEARNING_RATE = 0.0005 # Tốc độ học khởi tạo
+LEARNING_RATE = 0.0001 # Tốc độ học khởi tạo
 MAX_LEN = 100          # Độ dài câu tối đa
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ```
@@ -344,30 +344,79 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 	- Loss Function: Sử dụng CrossEntropyLoss với ignore_index=PAD_IDX để mô hình không tính lỗi cho các padding token.
    	- Code:
 	```python
-	model = Transformer(...).to(DEVICE)
+	# --- Model ---
+	model = Transformer(
+		src_vocab_size=len(src_vocab.stoi),
+		trg_vocab_size=len(trg_vocab.stoi),
+		src_pad_idx=0,
+		trg_pad_idx=0,
+		d_model=D_MODEL,
+		n_head=N_HEAD,
+		n_layer=N_LAYER,
+		d_ff=D_FF,
+		dropout=DROPOUT,
+		device=DEVICE
+	).to(DEVICE)
+
+	# --- Weights ---
+	# Xavier Initialization
+	def initialize_weights(m):
+		if hasattr(m, 'weight') and m.weight.dim() > 1:
+			nn.init.xavier_uniform_(m.weight.data)
+	model.apply(initialize_weights)
+
+	# --- Optimizer & Scheduler ---
+	optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.98), eps=1e-9)
+
+	# Loss Function
+	# ignore_index=0 ignore loss <pad> token
+	criterion = nn.CrossEntropyLoss(ignore_index=0)
 	```
 
 3. **Training Loop:**
 Nhóm thực hiện vòng lặp huấn luyện, theo dõi Loss trên tập Train và Validation sau mỗi epoch.
 ```python
-# Train model
+for epoch in range(EPOCHS):
+    start_time = time.time()
+
+    train_loss = train_epoch(model, train_loader, optimizer, criterion, CLIP)
+    valid_loss = evaluate(model, valid_loader, criterion)
+
+    end_time = time.time()
+    epoch_mins, epoch_secs = divmod(end_time - start_time, 60)
+
+    train_losses.append(train_loss)
+    valid_losses.append(valid_loss)
+    train_ppls.append(math.exp(train_loss))
+    valid_ppls.append(math.exp(valid_loss))
+
+    if valid_loss < best_valid_loss:
+        best_valid_loss = valid_loss
+        torch.save(model.state_dict(), 'transformer-model.pt')
+        print(f"Saved Model (Val Loss: {valid_loss:.3f})")
+
+    print(f'Epoch: {epoch+1:02} | Time: {int(epoch_mins)}m {int(epoch_secs)}s')
+    print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
+    print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
 ```
-- Đồ thị Loss: ...
-- Nhận xét: Loss giảm đều từ 6.x xuống 2.x sau 10 epochs, chứng tỏ mô hình đang học tốt.
+- Đồ thị Loss: ![](../figure/log_loss.jpg)
+- Nhận xét: Loss giảm đều từ 4.90 xuống 2.21 sau 10 epochs, chứng tỏ mô hình đang học tốt.
 
 ### D. Testing - Evaluation
 Nhóm sử dụng hai phương pháp đánh giá trên tập Test:
 - BLEU score: BLEU Score (Bilingual Evaluation Understudy): Độ đo tiêu chuẩn đánh giá sự trùng khớp n-grams giữa câu máy dịch và câu tham chiếu.
-- Gemini Score: Sử dụng LLM (gemini-2.5-flash) làm giám khảo để chấm điểm chất lượng bản dịch dựa trên thang điểm 1-10 về độ trôi chảy và chính xác ngữ nghĩa.
+- Gemini Score: Sử dụng LLM (gemini-2.5-flash) làm giám khảo để chấm điểm chất lượng bản dịch dựa trên thang điểm 1-100 về độ trôi chảy và chính xác ngữ nghĩa.
 
 ### E. Tối ưu
 - Sử dụng Beam Search: Thay vì Greedy tại mỗi bước chọn từ có xác suất cao nhất, Beam Search duy trì $k$ (beam width) ứng viên tốt nhất tại mỗi bước để tìm ra chuỗi từ tối ưu toàn cục.
 - Tối ưu tokenizer: Thử nghiệm thay thế tách từ đơn giản bằng BPE (Byte Pair Encoding) để xử lý tốt hơn các từ hiếm (OOV) và giảm kích thước từ điển.
-- Tối ưu hyperparameters:
-	- Tăng Dropout lên 0.2 khi train trên tập dữ liệu nhỏ để tăng khả năng tổng quát hóa.
-	- Sử dụng Learning Rate Scheduler (Warmup + Decay) thay vì LR cố định.
 
 ### D. Kết quả cuối cùng
-Bảng BLEU score, Gemini Score cho các phương pháp: RNN (base-line), Transformer cơ bản, Transformer v1, v2... (cải tiến tối ưu)
 
-## Bài 2: Dịch máy y tế VLSP 2025
+Bảng BLEU score và Gemini Score cho các phương pháp (Task 1 – IWLST-15 En–Vi):
+
+| Phương pháp              | BLEU Score | Gemini Score |
+| ------------------------ | ---------: | -----------: |
+| Basic                    |      24.61 |        65.75 |
+| Beam Search (k=3)        |      25.13 |        67.10 |
+| Word seg + BPE tokenizer |      25.36 |        67.72 |
